@@ -32,11 +32,22 @@ const CRASH_COOLDOWN_MS = 2_000;
  */
 const CRASH_LOOP_THRESHOLD = 5;
 
+/**
+ * Uptime since the last renderer crash that re-arms recovery (#2600): a
+ * renderer that ran a full recovery window without crashing recovered, so
+ * the breaker must not stay tripped for healthy sessions that merely crash
+ * again later. Time passing *after* the breaker tripped does not count —
+ * each crash refreshes the timestamp, so only real healthy uptime resets.
+ */
+const RECOVERY_WINDOW_MS = 30_000;
+
 /** Tracks the last reload timestamp per recovery call site. */
 let lastReloadTimestamp = 0;
 
 let consecutiveCrashesWithoutLoad = 0;
 let crashLoopReported = false;
+/** Last time the renderer was observed gone (crashed) — uptime anchor. */
+let lastCrashTimestamp = 0;
 
 /**
  * Reset internal cooldown state. Exposed exclusively for deterministic tests;
@@ -46,6 +57,7 @@ export function _resetCooldownForTest(): void {
   lastReloadTimestamp = 0;
   consecutiveCrashesWithoutLoad = 0;
   crashLoopReported = false;
+  lastCrashTimestamp = 0;
 }
 
 /** A renderer finished loading: the crash streak restarts from zero. */
@@ -71,6 +83,19 @@ export function recoverRendererAfterGone(
     return false;
   }
 
+  const now = Date.now();
+  const sinceLastCrash = now - lastCrashTimestamp;
+  lastCrashTimestamp = now;
+  // Only genuine healthy uptime since the previous crash re-arms recovery;
+  // time spent stopped by the breaker is punctuated by crashes and so never
+  // accumulates into a reset (#2600).
+  if (sinceLastCrash >= RECOVERY_WINDOW_MS) {
+    consecutiveCrashesWithoutLoad = 0;
+    // The crash streak restarts, so the escalation latch restarts with it:
+    // a later full crash loop trips again (the GPU-fallback marker in the
+    // escalation dedupes the relaunch itself, #2600).
+    crashLoopReported = false;
+  }
   consecutiveCrashesWithoutLoad += 1;
   const tripped =
     consecutiveCrashesWithoutLoad >= CRASH_LOOP_THRESHOLD && !crashLoopReported;
@@ -83,7 +108,6 @@ export function recoverRendererAfterGone(
   if (tripped) dependencies.onCrashLoopDetected?.();
   if (!reloaded) return false;
 
-  const now = Date.now();
   const elapsed = now - lastReloadTimestamp;
   lastReloadTimestamp = now;
 

@@ -158,6 +158,46 @@ describe("recoverRendererAfterGone", () => {
     assert.equal(trips, 0);
   });
 
+  it("counts actual reloads and stops them after the cap; time after the trip is not healthy uptime (#2600)", () => {
+    mock.timers.enable({ apis: ["Date", "setTimeout"] });
+    mock.timers.tick(10_000);
+
+    const details = { reason: "crashed", exitCode: 1 };
+    const attempt = recovery();
+    const recover = () => {
+      mock.timers.tick(3_000);
+      return recoverRendererAfterGone(details, attempt.dependencies);
+    };
+
+    // Startup crash loop: crashes 1-4 reload, crash 5 trips the breaker.
+    for (let i = 0; i < 5; i += 1) recover();
+    assert.equal(attempt.calls.reload, 4, "reloads stop once the breaker trips");
+
+    // The breaker stays tripped no matter how long it stays tripped: the
+    // crashes keep arriving, so no stretch of time is ever "healthy uptime".
+    for (let i = 0; i < 30; i += 1) recover();
+    assert.equal(attempt.calls.reload, 4, "time after the trip must not reset the crash counter");
+  });
+
+  it("a renderer that stays healthy past the recovery window re-arms recovery (#2600)", () => {
+    mock.timers.enable({ apis: ["Date", "setTimeout"] });
+    mock.timers.tick(10_000);
+
+    const details = { reason: "crashed", exitCode: 1 };
+    const attempt = recovery();
+    for (let i = 0; i < 5; i += 1) {
+      mock.timers.tick(3_000);
+      recoverRendererAfterGone(details, attempt.dependencies);
+    }
+    assert.equal(attempt.calls.reload, 4);
+
+    // Real healthy uptime: the renderer stays up a full recovery window
+    // (no crash in between), then a later crash recovers again.
+    mock.timers.tick(31_000);
+    assert.equal(recoverRendererAfterGone(details, attempt.dependencies), true);
+    assert.equal(attempt.calls.reload, 5, "recovery resumes after genuine healthy uptime");
+  });
+
   it("clean exits never count toward the breaker", () => {
     mock.timers.enable({ apis: ["Date", "setTimeout"] });
     mock.timers.tick(10_000);
